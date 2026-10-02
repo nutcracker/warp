@@ -529,6 +529,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::HistorySearchRankingV2,
         #[cfg(feature = "stored_screenshots")]
         FeatureFlag::StoredScreenshots,
+        #[cfg(feature = "commit_hash_hover")]
+        FeatureFlag::CommitHashHover,
     ]);
 
     flags

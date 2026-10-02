@@ -994,6 +994,10 @@ pub enum FeatureFlag {
     /// replace inline computer-use screenshot bytes with references to
     /// Warp-managed object storage.
     StoredScreenshots,
+
+    /// Underlines git commit hashes in block output once git confirms them, and shows the commit's
+    /// message in the link tooltip.
+    CommitHashHover,
 }
 
 static FLAG_STATES: [AtomicBool; cardinality::<FeatureFlag>()] =
@@ -1071,6 +1075,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::WarpingModelName,
     FeatureFlag::LrcActivitySignal,
     FeatureFlag::StoredScreenshots,
+    FeatureFlag::CommitHashHover,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).
@@ -1095,7 +1100,10 @@ pub const RELEASE_FLAGS: &[FeatureFlag] = &[
 ];
 
 /// Flags that we want to allow to switch at runtime (assuming RuntimeFeatureFlags is set)
-pub const RUNTIME_FEATURE_FLAGS: &[FeatureFlag] = &[FeatureFlag::LocalClaudeCodexChildHarnesses];
+pub const RUNTIME_FEATURE_FLAGS: &[FeatureFlag] = &[
+    FeatureFlag::LocalClaudeCodexChildHarnesses,
+    FeatureFlag::CommitHashHover,
+];
 
 impl FeatureFlag {
     pub fn is_enabled(&self) -> bool {

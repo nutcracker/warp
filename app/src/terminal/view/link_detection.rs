@@ -14,11 +14,13 @@ cfg_if::cfg_if! {
     if #[cfg(feature = "local_fs")] {
         use crate::{
             terminal::model::grid::grid_handler,
+            terminal::view::commit_links::{self, CommitLink, CommitLookup},
             terminal::ShellLaunchData,
             util::file::{FileLink, absolute_path_if_valid, ShellPathType},
             util::openable_file_type::FileTarget,
         };
-        use std::path::PathBuf;
+        use std::path::{Path, PathBuf};
+        use std::sync::{Arc, Mutex};
         use unicode_general_category::{get_general_category, GeneralCategory};
         use unicode_width::UnicodeWidthChar;
         use warp_util::path::CleanPathResult;
@@ -26,6 +28,8 @@ cfg_if::cfg_if! {
     }
 }
 
+#[cfg(feature = "local_fs")]
+use warp_core::features::FeatureFlag;
 #[cfg(feature = "local_fs")]
 use warp_errors::report_error;
 
@@ -124,6 +128,9 @@ pub enum GridHighlightedLink {
         link: WithinModel<Link>,
         uri: String,
     },
+    /// A commit hash that git confirmed in the directory the text came from.
+    #[cfg(feature = "local_fs")]
+    Commit(WithinModel<CommitLink>),
 }
 
 impl GridHighlightedLink {
@@ -133,6 +140,8 @@ impl GridHighlightedLink {
             #[cfg(feature = "local_fs")]
             GridHighlightedLink::File(file_link) => file_link.contains(position),
             GridHighlightedLink::Hyperlink { link, .. } => link.contains(position),
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::Commit(commit_link) => commit_link.contains(position),
         }
     }
 
@@ -152,6 +161,8 @@ impl GridHighlightedLink {
             GridHighlightedLink::File(_) => "Open file",
             GridHighlightedLink::Url(_) => "Open link",
             GridHighlightedLink::Hyperlink { .. } => "Open link",
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::Commit(_) => "Open commit",
         }
     }
 }
@@ -172,6 +183,10 @@ impl Serialize for GridHighlightedLink {
             GridHighlightedLink::Hyperlink { .. } => {
                 serializer.serialize_unit_variant("HighlightedLink", 2, "Hyperlink")
             }
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::Commit(_) => {
+                serializer.serialize_unit_variant("HighlightedLink", 3, "Commit")
+            }
         }
     }
 }
@@ -188,6 +203,10 @@ impl TryFrom<GridHighlightedLink> for Link {
                 link: WithinModel::AltScreen(link),
                 ..
             } => Ok(link),
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::Commit(WithinModel::AltScreen(commit_link)) => {
+                Ok(commit_link.link)
+            }
             _ => Err(anyhow::anyhow!(
                 "HighlightedLink is not within the alt screen"
             )),
@@ -209,6 +228,10 @@ impl TryFrom<GridHighlightedLink> for WithinBlock<Link> {
                 link: WithinModel::BlockList(link),
                 ..
             } => Ok(link),
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::Commit(WithinModel::BlockList(commit_link)) => {
+                Ok(commit_link.map(|commit_link| commit_link.link))
+            }
             _ => Err(anyhow::anyhow!(
                 "HighlightedLink is not within the block list"
             )),
@@ -316,6 +339,24 @@ impl HighlightedLinkOption {
                     model
                         .alt_screen_mut()
                         .set_smart_select_override(link.range.clone());
+                }
+            },
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::Commit(within_model) => match within_model {
+                WithinModel::BlockList(within_block) => {
+                    let point_range = WithinBlock::new(
+                        within_block.inner.link.range.clone(),
+                        within_block.block_index,
+                        within_block.grid,
+                    );
+                    model
+                        .block_list_mut()
+                        .set_smart_select_override(point_range);
+                }
+                WithinModel::AltScreen(commit_link) => {
+                    model
+                        .alt_screen_mut()
+                        .set_smart_select_override(commit_link.link.range.clone());
                 }
             },
         }
@@ -520,6 +561,12 @@ impl super::TerminalView {
             GridHighlightedLink::Hyperlink { uri, .. } => {
                 self.open_hyperlink_uri(uri, ctx);
             }
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::Commit(commit_link) => {
+                if let Some(web_url) = &commit_link.get_inner().info.web_url {
+                    ctx.open_url(web_url);
+                }
+            }
         };
     }
 
@@ -586,7 +633,17 @@ impl super::TerminalView {
             // Check if we are hovering on any file path. Don't scan for file path
             // if user is hovering from an editor like vim or nano.
             Some(path) if matches!(from_editor, TerminalEditor::No) => {
-                let possible_paths = self.model.lock().possible_file_paths_at_point(position);
+                let (possible_paths, commit_fragment) = {
+                    let model = self.model.lock();
+                    let commit_fragment = FeatureFlag::CommitHashHover
+                        .is_enabled()
+                        .then(|| Self::hovered_fragment(&model, &position));
+                    (
+                        model.possible_file_paths_at_point(position),
+                        commit_fragment,
+                    )
+                };
+                let commit_cache = self.commit_cache.clone();
                 let max_columns = self.size_info.columns;
                 let shell_launch_data = self
                     .active_block_session_id()
@@ -605,7 +662,12 @@ impl super::TerminalView {
                             max_columns,
                             shell_launch_data,
                         );
-                        let _ = tx.send(paths);
+                        let link = paths.or_else(|| {
+                            commit_fragment.and_then(|fragment| {
+                                Self::compute_commit_link(&path, fragment, &commit_cache)
+                            })
+                        });
+                        let _ = tx.send(link);
                     })
                     .map_err(|e| {
                         report_error!(anyhow::Error::new(e).context("Unable to spawn thread"));
@@ -752,6 +814,76 @@ impl super::TerminalView {
         }
 
         link.map(GridHighlightedLink::File)
+    }
+
+    /// The text and range of the separator-delimited word at `position`.
+    fn hovered_fragment(
+        model: &TerminalModel,
+        position: &WithinModel<Point>,
+    ) -> (String, WithinModel<Link>) {
+        let fragment = model.fragment_boundary_at_point(position);
+        let range = fragment.get_inner().0.clone();
+        let end = Point {
+            row: range.end.row,
+            col: range.end.col.saturating_sub(1).max(range.start.col),
+        };
+        let link = fragment.replace_inner(Link {
+            range: range.start..=end,
+            is_empty: false,
+        });
+        let text = model.string_at_range(&link, RespectObfuscatedSecrets::Yes);
+        (text, link)
+    }
+
+    /// Resolves a hovered word to a commit link, if it is a commit in `working_directory`.
+    fn compute_commit_link(
+        working_directory: &str,
+        (fragment_text, fragment_link): (String, WithinModel<Link>),
+        commit_cache: &Arc<Mutex<commit_links::CommitCache>>,
+    ) -> Option<GridHighlightedLink> {
+        let candidate = commit_links::commit_candidate(&fragment_text)?;
+        let fragment_range = fragment_link.get_inner().range.clone();
+        // The fragment is on a single row, so trimmed characters (all ASCII) map to columns.
+        if fragment_range.start().row != fragment_range.end().row
+            || !fragment_text.is_ascii()
+            || fragment_range.end().col - fragment_range.start().col + 1 != fragment_text.len()
+        {
+            return None;
+        }
+
+        match commit_links::lookup_commit_cached(
+            commit_cache,
+            Path::new(working_directory),
+            candidate.hash,
+        ) {
+            CommitLookup::Commit(info) => {
+                let start = Point {
+                    row: fragment_range.start().row,
+                    col: fragment_range.start().col + candidate.leading_trim,
+                };
+                let end = Point {
+                    row: fragment_range.end().row,
+                    col: fragment_range.end().col - candidate.trailing_trim,
+                };
+                Some(GridHighlightedLink::Commit(fragment_link.replace_inner(
+                    CommitLink {
+                        link: Link {
+                            range: start..=end,
+                            is_empty: false,
+                        },
+                        info,
+                    },
+                )))
+            }
+            CommitLookup::NotACommit => None,
+            CommitLookup::Unknown(reason) => {
+                log::debug!(
+                    "Commit lookup for {} gave no answer: {reason}",
+                    candidate.hash
+                );
+                None
+            }
+        }
     }
 
     fn create_valid_link(

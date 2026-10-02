@@ -267,6 +267,8 @@ pub enum TerminalAction {
         show_secret: bool,
     },
     CopyRichContentSecret(RichContentSecretTooltipInfo),
+    /// Copies a commit's full hash from the link tooltip.
+    CopyCommitHash(String),
     ShowInFileExplorer(PathBuf),
     OpenFileInWarp(PathBuf),
     #[cfg(feature = "local_fs")]
@@ -602,6 +604,7 @@ impl fmt::Debug for TerminalAction {
             }
             CopyGridSecret(_) => f.write_str("CopyGridSecret"),
             CopyRichContentSecret(_) => f.write_str("CopyRichContentSecret"),
+            CopyCommitHash(_) => f.write_str("CopyCommitHash"),
             ShowInFileExplorer(_) => f.write_str("ShowInFileExplorer"),
             OpenFileInWarp(_) => f.write_str("OpenFileInWarp"),
             #[cfg(feature = "local_fs")]

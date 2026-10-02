@@ -30,6 +30,8 @@ use warp_util::standardized_path::StandardizedPath;
 
 use crate::ai::block_context::BlockContext;
 use crate::global_resource_handles::GlobalResourceHandlesProvider;
+#[cfg(feature = "local_fs")]
+mod commit_links;
 pub(crate) mod docker_sandbox;
 mod link_detection;
 mod open_in_warp;
@@ -2373,6 +2375,8 @@ struct TerminalViewMouseStates {
     open_in_warp_tooltip: MouseStateHandle,
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     show_in_file_explorer_tooltip: MouseStateHandle,
+    #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
+    copy_commit_hash_tooltip: MouseStateHandle,
     jump_to_bottom_of_block_button: MouseStateHandle,
 
     parent_conversation_header_link: MouseStateHandle,
@@ -2694,6 +2698,10 @@ pub struct TerminalView {
 
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     file_link_scanning_join_handle: Option<JoinHandle<()>>,
+
+    /// Shared with the link-scanning threads, which consult it before running git.
+    #[cfg(feature = "local_fs")]
+    commit_cache: std::sync::Arc<std::sync::Mutex<commit_links::CommitCache>>,
 
     last_focus_ts: Option<NaiveDateTime>,
     tips_completed: ModelHandle<TipsCompleted>,
@@ -4433,6 +4441,8 @@ impl TerminalView {
             inline_banners_state: Default::default(),
             bookmarked_blocks: Default::default(),
             file_link_scanning_join_handle: None,
+            #[cfg(feature = "local_fs")]
+            commit_cache: Default::default(),
             last_focus_ts: None,
             tips_completed: resources.tips_completed.clone(),
             privacy_settings_snapshot: privacy_settings_handle.as_ref(ctx).get_snapshot(ctx),
@@ -17357,6 +17367,30 @@ impl TerminalView {
                                 .into_item(),
                         ]
                     }
+                    #[cfg(feature = "local_fs")]
+                    GridHighlightedLink::Commit(commit_link) => {
+                        let info = &commit_link.get_inner().info;
+                        let mut items = Vec::new();
+                        if info.web_url.is_some() {
+                            items.push(
+                                MenuItemFields::new("Open commit")
+                                    .with_on_select_action(TerminalAction::OpenGridLink(
+                                        highlighted_link.clone(),
+                                    ))
+                                    .into_item(),
+                            );
+                        }
+                        items.push(
+                            MenuItemFields::new("Copy commit hash")
+                                .with_on_select_action(TerminalAction::ContextMenu(
+                                    ContextMenuAction::CopyUrl {
+                                        url_content: info.full_hash.clone(),
+                                    },
+                                ))
+                                .into_item(),
+                        );
+                        items
+                    }
                 };
 
                 if !items.is_empty() {
@@ -19187,6 +19221,13 @@ impl TerminalView {
             }
             GridHighlightedLink::Hyperlink { link, uri } if link.contains(position) => {
                 self.open_hyperlink_uri(uri, ctx);
+            }
+            #[cfg(feature = "local_fs")]
+            GridHighlightedLink::Commit(commit_link) if commit_link.contains(position) => {
+                if let Some(web_url) = &commit_link.get_inner().info.web_url {
+                    ctx.notify();
+                    ctx.open_url(web_url);
+                }
             }
             _ => (),
         }
@@ -27379,6 +27420,7 @@ impl TypedActionView for TerminalView {
             | ToggleRichContentSecret { .. }
             | CopyGridSecret(_)
             | CopyRichContentSecret(_)
+            | CopyCommitHash(_)
             | ShowInFileExplorer(_)
             | OpenFileInWarp(_)
             | CtrlD
@@ -27821,6 +27863,12 @@ impl TypedActionView for TerminalView {
             CopyGridSecret(secret_handle) => self.copy_grid_secret(secret_handle, ctx),
             CopyRichContentSecret(rich_content_tooltip_info) => {
                 self.copy_rich_content_secret(rich_content_tooltip_info.clone(), ctx)
+            }
+            CopyCommitHash(full_hash) => {
+                ctx.clipboard()
+                    .write(ClipboardContent::plain_text(full_hash.clone()));
+                self.dismiss_tooltips(ctx);
+                ctx.notify();
             }
             OpenGridLink(link) => {
                 self.open_highlighted_link(link, ctx);

@@ -209,3 +209,82 @@ fn compute_valid_paths_keeps_trailing_fullwidth_punctuation_when_it_is_the_filen
         }
     );
 }
+
+#[test]
+fn commit_link_range_excludes_trimmed_punctuation() {
+    use std::sync::{Arc, Mutex};
+
+    use command::blocking::Command;
+
+    use crate::terminal::model::grid::grid_handler::Link;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(dir.path())
+            .env("GIT_AUTHOR_NAME", "Test Author")
+            .env("GIT_AUTHOR_EMAIL", "author@example.com")
+            .env("GIT_COMMITTER_NAME", "Test Author")
+            .env("GIT_COMMITTER_EMAIL", "author@example.com")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    git(&[
+        "commit",
+        "-q",
+        "--allow-empty",
+        "--no-verify",
+        "-m",
+        "Subject",
+    ]);
+    let head = git(&["rev-parse", "HEAD"]);
+
+    let cache = Arc::new(Mutex::new(Default::default()));
+    // The fragment `**<hash>.` starting at column 10, as it would appear in a sentence.
+    let fragment_text = format!("**{}.", &head[..9]);
+    let fragment_link = |text: &str| {
+        WithinModel::AltScreen(Link {
+            range: Point { row: 3, col: 10 }..=Point {
+                row: 3,
+                col: 10 + text.len() - 1,
+            },
+            is_empty: false,
+        })
+    };
+
+    let link = TerminalView::compute_commit_link(
+        dir.path().to_str().unwrap(),
+        (fragment_text.clone(), fragment_link(&fragment_text)),
+        &cache,
+    )
+    .expect("the hash should resolve to a commit link");
+    let GridHighlightedLink::Commit(commit_link) = link else {
+        panic!("expected a commit link");
+    };
+    let commit_link = commit_link.get_inner();
+    assert_eq!(commit_link.info.full_hash, head);
+    assert_eq!(
+        commit_link.link.range,
+        Point { row: 3, col: 12 }..=Point { row: 3, col: 20 }
+    );
+
+    // Negative control: a hex word that isn't a commit in the same repo gives no link.
+    let not_a_commit = if head.starts_with("deadbeef") {
+        "facade1"
+    } else {
+        "deadbeef"
+    };
+    assert!(
+        TerminalView::compute_commit_link(
+            dir.path().to_str().unwrap(),
+            (not_a_commit.to_owned(), fragment_link(not_a_commit)),
+            &cache,
+        )
+        .is_none()
+    );
+}

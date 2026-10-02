@@ -67,6 +67,20 @@ pub fn render_tooltip<OnClick>(
 where
     OnClick: 'static + Fn(&mut EventContext),
 {
+    render_tooltip_with_content(tooltip_links, redaction, None, appearance, app)
+}
+
+/// Like [`render_tooltip`], with `content` shown below the link row.
+pub fn render_tooltip_with_content<OnClick>(
+    tooltip_links: impl IntoIterator<Item = TooltipLink<OnClick>>,
+    redaction: TooltipRedaction,
+    content: Option<Box<dyn Element>>,
+    appearance: &Appearance,
+    app: &AppContext,
+) -> Box<dyn Element>
+where
+    OnClick: 'static + Fn(&mut EventContext),
+{
     let mut tooltip = Flex::column();
     let mut links = Vec::new();
     let mut first = true;
@@ -184,6 +198,10 @@ where
                 tooltip.add_child(link_row);
             }
         }
+    }
+
+    if let Some(content) = content {
+        tooltip.add_child(Container::new(content).with_margin_top(6.).finish());
     }
 
     let is_secret = matches!(
